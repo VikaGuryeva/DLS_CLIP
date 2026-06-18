@@ -1,0 +1,16 @@
+{
+  "model_file": "ffhq_stylegan2_256.pkl",
+  "model_sha256": "7aa4ddeee38e007ce92a1a0bccd386fc6abba6b5c8692bdbe813d3f1987c0722",
+  "repository_commit": "d72cc7d041b42ec8e806021a205ed9349f87c6a4",
+  "z_dim": 512,
+  "w_dim": 512,
+  "num_ws": 14,
+  "c_dim": 0,
+  "resolution": 256,
+  "channels": 3,
+  "truncation_psi": 1.0,
+  "noise_mode": "const",
+  "pytorch_version": "2.11.0+cu128",
+  "cuda_version": "12.8",
+  "gpu": "Tesla T4"
+}

@@ -1,0 +1,5 @@
+ninja
+numpy
+pandas
+Pillow
+matplotlib
