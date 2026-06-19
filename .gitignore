@@ -1,35 +1,28 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Virtual environments
 .venv/
-venv/
-
-# Secrets
-.env
-*.token
-
-# Large model files
-*.pkl
-*.pt
-*.pth
-*.ckpt
-
-# Generated data
-data/
-models/
-weights/
-outputs/
+*.so
+# Python
 checkpoints/
-
-# Third-party repositories
-third_party/
-
 # OS files
+# Large model files
+# Third-party repositories
+*.pth
 .DS_Store
 Thumbs.db
+*.pt
+*.token
+third_party/
+weights/
+.ipynb_checkpoints/
+models/
+.env
+# Secrets
+# Generated data
+# Jupyter
+*.pkl
+data/
+__pycache__/
+venv/
+*.ckpt
+outputs/
+# Virtual environments
+*.py[cod]
