@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -11,6 +10,7 @@ from typing import Any, Mapping
 
 import torch
 from matplotlib.figure import Figure
+from PIL import Image
 
 from .data_utils import SourceSample
 from .optimization import OptimizationResult
@@ -23,10 +23,6 @@ from .visualization import (
 
 @dataclass(frozen=True)
 class ExperimentArtifacts:
-    """
-    Пути ко всем файлам, сохранённым для одного эксперимента.
-    """
-
     root_dir: Path
     config_path: Path
     metrics_path: Path
@@ -42,11 +38,6 @@ class ExperimentArtifacts:
 def _get_git_commit(
     repo_dir: str | Path | None,
 ) -> str | None:
-    """
-    Возвращает hash текущего Git commit.
-    Если определить commit невозможно, возвращает None.
-    """
-
     if repo_dir is None:
         return None
 
@@ -67,7 +58,6 @@ def _get_git_commit(
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-
     except (
         subprocess.CalledProcessError,
         FileNotFoundError,
@@ -79,13 +69,6 @@ def _prepare_output_directory(
     output_dir: str | Path,
     overwrite: bool,
 ) -> Path:
-    """
-    Создаёт папку эксперимента.
-
-    По умолчанию не позволяет случайно перезаписать
-    уже существующий непустой каталог.
-    """
-
     output_dir = Path(output_dir)
 
     if (
@@ -111,10 +94,6 @@ def _write_json(
     path: Path,
     data: dict[str, Any],
 ) -> None:
-    """
-    Сохраняет словарь в UTF-8 JSON.
-    """
-
     with path.open(
         "w",
         encoding="utf-8",
@@ -132,15 +111,10 @@ def _build_config(
     source_sample: SourceSample,
     clip_model_id: str | None,
     generator_info: Mapping[str, Any] | None,
+    identity_model_info: Mapping[str, Any] | None,
     git_commit: str | None,
 ) -> dict[str, Any]:
-    """
-    Формирует воспроизводимую конфигурацию эксперимента.
-    """
-
-    config = asdict(
-        result.config
-    )
+    config = asdict(result.config)
 
     config.update(
         {
@@ -163,16 +137,17 @@ def _build_config(
             generator_info
         )
 
+    if identity_model_info is not None:
+        config["identity_model"] = dict(
+            identity_model_info
+        )
+
     return config
 
 
 def _build_metrics_summary(
     result: OptimizationResult,
 ) -> dict[str, Any]:
-    """
-    Формирует итоговые численные метрики запуска.
-    """
-
     history = result.history
 
     if history.empty:
@@ -183,13 +158,14 @@ def _build_metrics_summary(
     initial_row = history.iloc[0]
     final_row = history.iloc[-1]
 
-    summary = {
-        "initial_step": int(
-            initial_row["step"]
-        ),
-        "final_step": int(
-            final_row["step"]
-        ),
+    identity_enabled = (
+        "identity_similarity" in history.columns
+        and history["identity_similarity"].notna().any()
+    )
+
+    summary: dict[str, Any] = {
+        "initial_step": int(initial_row["step"]),
+        "final_step": int(final_row["step"]),
         "initial_total_loss": float(
             initial_row["total_loss"]
         ),
@@ -232,9 +208,7 @@ def _build_metrics_summary(
         "final_latent_distance": float(
             final_row["latent_distance"]
         ),
-        "best_step": int(
-            result.best_step
-        ),
+        "best_step": int(result.best_step),
         "best_clip_similarity": float(
             result.best_clip_similarity
         ),
@@ -245,7 +219,73 @@ def _build_metrics_summary(
             result.elapsed_time_seconds
             / result.config.num_steps
         ),
+        "identity_enabled": bool(
+            identity_enabled
+        ),
     }
+
+    if identity_enabled:
+        identity_history = history.dropna(
+            subset=["identity_similarity"]
+        )
+
+        initial_identity_row = (
+            identity_history.iloc[0]
+        )
+        final_identity_row = (
+            identity_history.iloc[-1]
+        )
+
+        summary.update(
+            {
+                "initial_identity_similarity": float(
+                    initial_identity_row[
+                        "identity_similarity"
+                    ]
+                ),
+                "final_identity_similarity": float(
+                    final_identity_row[
+                        "identity_similarity"
+                    ]
+                ),
+                "identity_similarity_change": float(
+                    final_identity_row[
+                        "identity_similarity"
+                    ]
+                    - initial_identity_row[
+                        "identity_similarity"
+                    ]
+                ),
+                "initial_id_loss": float(
+                    initial_identity_row["id_loss"]
+                ),
+                "final_id_loss": float(
+                    final_identity_row["id_loss"]
+                ),
+                "final_weighted_id_loss": float(
+                    final_identity_row[
+                        "weighted_id_loss"
+                    ]
+                ),
+                "minimum_identity_similarity": float(
+                    identity_history[
+                        "identity_similarity"
+                    ].min()
+                ),
+            }
+        )
+    else:
+        summary.update(
+            {
+                "initial_identity_similarity": None,
+                "final_identity_similarity": None,
+                "identity_similarity_change": None,
+                "initial_id_loss": None,
+                "final_id_loss": None,
+                "final_weighted_id_loss": None,
+                "minimum_identity_similarity": None,
+            }
+        )
 
     return summary
 
@@ -254,16 +294,10 @@ def _build_environment_info(
     repo_dir: str | Path | None,
     git_commit: str | None,
 ) -> dict[str, Any]:
-    """
-    Фиксирует версии окружения для воспроизводимости.
-    """
-
     gpu_name = None
 
     if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(
-            0
-        )
+        gpu_name = torch.cuda.get_device_name(0)
 
     return {
         "python_version": platform.python_version(),
@@ -291,37 +325,17 @@ def _save_latents(
     path: Path,
     source_sample: SourceSample,
 ) -> None:
-    """
-    Сохраняет исходный, финальный и лучший latent-коды.
-    """
-
     torch.save(
         {
             "image_id": source_sample.image_id,
-            "source_seed": int(
-                source_sample.seed
-            ),
+            "source_seed": int(source_sample.seed),
             "target_prompt": (
                 result.config.target_prompt
             ),
-            "source_w": (
-                result.source_w
-                .detach()
-                .cpu()
-            ),
-            "edited_w": (
-                result.edited_w
-                .detach()
-                .cpu()
-            ),
-            "best_w": (
-                result.best_w
-                .detach()
-                .cpu()
-            ),
-            "best_step": int(
-                result.best_step
-            ),
+            "source_w": result.source_w.detach().cpu(),
+            "edited_w": result.edited_w.detach().cpu(),
+            "best_w": result.best_w.detach().cpu(),
+            "best_step": int(result.best_step),
             "best_clip_similarity": float(
                 result.best_clip_similarity
             ),
@@ -334,10 +348,6 @@ def _save_step_images(
     result: OptimizationResult,
     images_dir: Path,
 ) -> dict[str, Path]:
-    """
-    Сохраняет все промежуточные изображения.
-    """
-
     images_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -348,10 +358,8 @@ def _save_step_images(
     for step, image_tensor in sorted(
         result.saved_images.items()
     ):
-        image_array = (
-            stylegan_tensor_to_uint8(
-                image_tensor
-            )
+        image_array = stylegan_tensor_to_uint8(
+            image_tensor
         )
 
         image_path = (
@@ -359,11 +367,7 @@ def _save_step_images(
             / f"step_{step:03d}.png"
         )
 
-        from PIL import Image
-
-        Image.fromarray(
-            image_array
-        ).save(
+        Image.fromarray(image_array).save(
             image_path
         )
 
@@ -371,36 +375,21 @@ def _save_step_images(
             f"step_{step:03d}"
         ] = image_path
 
-    source_step = 0
-    final_step = result.config.num_steps
-
-    if source_step in result.saved_images:
-        source_path = (
-            images_dir
-            / "source.png"
-        )
-
-        from PIL import Image
+    if 0 in result.saved_images:
+        source_path = images_dir / "source.png"
 
         Image.fromarray(
             stylegan_tensor_to_uint8(
-                result.saved_images[
-                    source_step
-                ]
+                result.saved_images[0]
             )
-        ).save(
-            source_path
-        )
+        ).save(source_path)
 
         saved_paths["source"] = source_path
 
-    if final_step in result.saved_images:
-        final_path = (
-            images_dir
-            / "final.png"
-        )
+    final_step = result.config.num_steps
 
-        from PIL import Image
+    if final_step in result.saved_images:
+        final_path = images_dir / "final.png"
 
         Image.fromarray(
             stylegan_tensor_to_uint8(
@@ -408,19 +397,12 @@ def _save_step_images(
                     final_step
                 ]
             )
-        ).save(
-            final_path
-        )
+        ).save(final_path)
 
         saved_paths["final"] = final_path
 
     if result.best_step in result.saved_images:
-        best_path = (
-            images_dir
-            / "best.png"
-        )
-
-        from PIL import Image
+        best_path = images_dir / "best.png"
 
         Image.fromarray(
             stylegan_tensor_to_uint8(
@@ -428,9 +410,7 @@ def _save_step_images(
                     result.best_step
                 ]
             )
-        ).save(
-            best_path
-        )
+        ).save(best_path)
 
         saved_paths["best"] = best_path
 
@@ -442,10 +422,6 @@ def _save_figures(
     figures_dir: Path,
     dpi: int,
 ) -> dict[str, Path]:
-    """
-    Сохраняет matplotlib figures.
-    """
-
     figures_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -465,9 +441,7 @@ def _save_figures(
             bbox_inches="tight",
         )
 
-        saved_paths[name] = (
-            figure_path
-        )
+        saved_paths[name] = figure_path
 
     return saved_paths
 
@@ -477,14 +451,29 @@ def build_notes_template(
     source_sample: SourceSample,
     metrics_summary: Mapping[str, Any],
 ) -> str:
-    """
-    Формирует Markdown-шаблон отчёта на русском языке.
-
-    Численные данные заполняются автоматически.
-    Визуальные наблюдения оставляются исследователю.
-    """
-
     config = result.config
+    identity_enabled = bool(
+        metrics_summary["identity_enabled"]
+    )
+
+    if identity_enabled:
+        identity_metrics_text = f"""
+## 3. Метрики сохранения identity
+
+- Начальная identity similarity: `{metrics_summary["initial_identity_similarity"]:.6f}`
+- Финальная identity similarity: `{metrics_summary["final_identity_similarity"]:.6f}`
+- Изменение identity similarity: `{metrics_summary["identity_similarity_change"]:+.6f}`
+- Минимальная identity similarity: `{metrics_summary["minimum_identity_similarity"]:.6f}`
+- Начальный ID loss: `{metrics_summary["initial_id_loss"]:.6f}`
+- Финальный ID loss: `{metrics_summary["final_id_loss"]:.6f}`
+- Финальный взвешенный ID loss: `{metrics_summary["final_weighted_id_loss"]:.6f}`
+"""
+    else:
+        identity_metrics_text = """
+## 3. Метрики сохранения identity
+
+Identity loss в этом эксперименте не использовался.
+"""
 
     return f"""# Эксперимент: {config.experiment_name}
 
@@ -498,9 +487,10 @@ def build_notes_template(
 - Learning rate: `{config.learning_rate}`
 - Optimizer: Adam
 - Коэффициент L2: `{config.lambda_l2}`
+- Коэффициент identity loss: `{config.lambda_id}`
 - Noise mode: `{config.noise_mode}`
 
-## 2. Количественные результаты
+## 2. Основные количественные результаты
 
 - Начальная CLIP similarity: `{metrics_summary["initial_clip_similarity"]:.6f}`
 - Финальная CLIP similarity: `{metrics_summary["final_clip_similarity"]:.6f}`
@@ -508,50 +498,32 @@ def build_notes_template(
 - Начальный CLIP loss: `{metrics_summary["initial_clip_loss"]:.6f}`
 - Финальный CLIP loss: `{metrics_summary["final_clip_loss"]:.6f}`
 - Финальный L2 loss: `{metrics_summary["final_l2_loss"]:.6f}`
-- Взвешенный L2 loss: `{metrics_summary["final_weighted_l2_loss"]:.6f}`
+- Финальный взвешенный L2 loss: `{metrics_summary["final_weighted_l2_loss"]:.6f}`
 - Финальное расстояние в W+: `{metrics_summary["final_latent_distance"]:.6f}`
-- Лучший шаг: `{metrics_summary["best_step"]}`
+- Лучший шаг по CLIP similarity: `{metrics_summary["best_step"]}`
 - Лучшая CLIP similarity: `{metrics_summary["best_clip_similarity"]:.6f}`
 - Время выполнения: `{metrics_summary["elapsed_time_seconds"]:.4f}` секунд
 - Среднее время одного обновления: `{metrics_summary["average_seconds_per_update"]:.6f}` секунд
 
-## 3. Визуальные наблюдения
+{identity_metrics_text}
 
-<!-- Заполнить после просмотра optimization_grid.png.
+## 4. Визуальные наблюдения
 
-Опиши:
-- появился ли целевой атрибут;
-- сохранилась ли личность;
-- изменились ли фон, одежда, волосы и освещение;
-- насколько локальным получилось редактирование.
--->
+<!-- Опиши появление целевого атрибута и сохранение личности. -->
 
-## 4. Интерпретация динамики loss
+## 5. Интерпретация динамики loss
 
-<!-- Опиши:
-- как изменялись CLIP loss и similarity;
-- появились ли колебания;
-- как изменялось расстояние от исходного W+;
-- как повлияла L2-регуляризация.
--->
+<!-- Опиши компромисс между CLIP, L2 и ID-компонентами. -->
 
-## 5. Вывод
+## 6. Вывод
 
-<!-- Сформулируй:
-- достигнута ли семантическая цель;
-- насколько хорошо сохранилось исходное изображение;
-- какие параметры нужно проверить в следующем эксперименте.
--->
+<!-- Сформулируй итог и следующие параметры для проверки. -->
 """
 
 
 def _build_manifest(
     root_dir: Path,
 ) -> dict[str, Any]:
-    """
-    Формирует список сохранённых файлов и их размеров.
-    """
-
     files = []
 
     for path in sorted(
@@ -561,9 +533,7 @@ def _build_manifest(
             files.append(
                 {
                     "path": str(
-                        path.relative_to(
-                            root_dir
-                        )
+                        path.relative_to(root_dir)
                     ),
                     "size_bytes": int(
                         path.stat().st_size
@@ -585,6 +555,7 @@ def save_experiment_package(
     *,
     clip_model_id: str | None = None,
     generator_info: Mapping[str, Any] | None = None,
+    identity_model_info: Mapping[str, Any] | None = None,
     repo_dir: str | Path | None = None,
     notes_text: str | None = None,
     figures: Mapping[str, Figure] | None = None,
@@ -593,43 +564,6 @@ def save_experiment_package(
     dpi: int = 200,
     overwrite: bool = False,
 ) -> ExperimentArtifacts:
-    """
-    Сохраняет полный пакет одного эксперимента.
-
-    Создаются:
-    - config.json;
-    - metrics_summary.json;
-    - environment.json;
-    - history.csv;
-    - latents.pt;
-    - images/*.png;
-    - figures/*.png;
-    - experiment_notes.md;
-    - manifest.json.
-
-    Parameters
-    ----------
-    result:
-        Результат optimize_latent().
-
-    source_sample:
-        Исходный объект из latent bank.
-
-    output_dir:
-        Каталог конкретного эксперимента.
-
-    figures:
-        Готовые фигуры. Если не переданы и
-        create_figures=True, создаются автоматически.
-
-    notes_text:
-        Готовый Markdown-текст. Если не передан,
-        создаётся шаблон с автоматическими метриками.
-
-    overwrite:
-        Разрешает перезапись непустого каталога.
-    """
-
     if dpi < 1:
         raise ValueError(
             "dpi must be positive."
@@ -640,44 +574,21 @@ def save_experiment_package(
         overwrite=overwrite,
     )
 
-    images_dir = (
-        output_dir / "images"
-    )
-
-    figures_dir = (
-        output_dir / "figures"
-    )
-
-    config_path = (
-        output_dir / "config.json"
-    )
-
+    images_dir = output_dir / "images"
+    figures_dir = output_dir / "figures"
+    config_path = output_dir / "config.json"
     metrics_path = (
-        output_dir
-        / "metrics_summary.json"
+        output_dir / "metrics_summary.json"
     )
-
     environment_path = (
-        output_dir
-        / "environment.json"
+        output_dir / "environment.json"
     )
-
-    history_path = (
-        output_dir / "history.csv"
-    )
-
-    latent_path = (
-        output_dir / "latents.pt"
-    )
-
+    history_path = output_dir / "history.csv"
+    latent_path = output_dir / "latents.pt"
     notes_path = (
-        output_dir
-        / "experiment_notes.md"
+        output_dir / "experiment_notes.md"
     )
-
-    manifest_path = (
-        output_dir / "manifest.json"
-    )
+    manifest_path = output_dir / "manifest.json"
 
     git_commit = _get_git_commit(
         repo_dir
@@ -688,32 +599,21 @@ def save_experiment_package(
         source_sample=source_sample,
         clip_model_id=clip_model_id,
         generator_info=generator_info,
+        identity_model_info=identity_model_info,
         git_commit=git_commit,
     )
 
-    metrics_data = (
-        _build_metrics_summary(
-            result
-        )
+    metrics_data = _build_metrics_summary(
+        result
     )
 
-    environment_data = (
-        _build_environment_info(
-            repo_dir=repo_dir,
-            git_commit=git_commit,
-        )
+    environment_data = _build_environment_info(
+        repo_dir=repo_dir,
+        git_commit=git_commit,
     )
 
-    _write_json(
-        config_path,
-        config_data,
-    )
-
-    _write_json(
-        metrics_path,
-        metrics_data,
-    )
-
+    _write_json(config_path, config_data)
+    _write_json(metrics_path, metrics_data)
     _write_json(
         environment_path,
         environment_data,
@@ -741,7 +641,6 @@ def save_experiment_package(
         figures = create_standard_figures(
             result
         )
-
         created_figures = True
 
     if figures is not None:
@@ -768,14 +667,10 @@ def save_experiment_package(
         and figures is not None
         and close_created_figures
     ):
-        close_figures(
-            figures
-        )
+        close_figures(figures)
 
-    manifest_data = (
-        _build_manifest(
-            output_dir
-        )
+    manifest_data = _build_manifest(
+        output_dir
     )
 
     _write_json(
